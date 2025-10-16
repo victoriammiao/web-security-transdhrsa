@@ -3,31 +3,31 @@
     <h1>🔐 Secure Mail (DH & RSA)</h1>
 
     <!-- Step 1：注册 / 登录 -->
-    <div v-if="!registered" class="register-container">
-      <RegisterForm @registered="handleRegistered" />
+    <div v-if="!registered" class="auth-container">
+      <RegisterForm v-if="!showLogin" @registered="handleRegistered" @show-login="showLogin = true" />
+      <LoginForm v-else @logged-in="handleRegistered" @show-register="showLogin = false" />
     </div>
 
     <!-- Step 2：邮箱主界面 -->
     <div v-else class="mailbox-container">
       <div class="top-bar">
         <span>👤 User: {{ username }}</span>
-        <span>Mode: 
+        <span>Mode:
           <select v-model="mode">
             <option value="DH">DH</option>
             <option value="RSA">RSA</option>
           </select>
         </span>
         <button @click="logout">Logout</button>
+        
       </div>
 
-      <!-- 邮箱主界面 -->
       <Mailbox 
         :username="username" 
         :mode="mode" 
         @view-mail="viewMail"
       />
 
-      <!-- 邮件详情弹窗 -->
       <MailView 
         v-if="selectedMail" 
         :mail="selectedMail" 
@@ -38,8 +38,9 @@
 </template>
 
 <script setup>
-import { ref } from "vue";
+import { ref, onMounted } from "vue";
 import RegisterForm from "./components/RegisterForm.vue";
+import LoginForm from "./components/LoginForm.vue";
 import Mailbox from "./components/Mailbox.vue";
 import MailView from "./components/MailView.vue";
 
@@ -47,14 +48,27 @@ const registered = ref(false);
 const username = ref("");
 const mode = ref("DH");
 const selectedMail = ref(null);
+const showLogin = ref(false);
 
-/** 注册成功后的处理 */
+// 如果有 token/username 存在，自动恢复登录状态（可选）
+onMounted(() => {
+  const saved = localStorage.getItem("username");
+  if (saved) {
+    username.value = saved;
+    registered.value = true;
+  }
+});
+
+/** 注册或登录成功后的统一处理（LoginForm emit logged-in / RegisterForm emit registered） */
 function handleRegistered(payload) {
-  if (!payload) return; // 防止 emit(undefined)
+  if (!payload) return;
   const { username: u, mode: m } = payload;
-  username.value = u;
-  mode.value = m;
+  username.value = u || localStorage.getItem("username") || username.value;
+  if (m) mode.value = m;
+  // 标记已登录/已注册
   registered.value = true;
+  // 保持 username 到 localStorage 以便刷新恢复
+  if (username.value) localStorage.setItem("username", username.value);
 }
 
 /** 点击查看邮件 */
@@ -64,10 +78,11 @@ function viewMail(mail) {
 
 /** 登出操作 */
 function logout() {
-  localStorage.clear();
+  localStorage.removeItem("username");
   registered.value = false;
   username.value = "";
   selectedMail.value = null;
+  showLogin.value = false;
 }
 </script>
 

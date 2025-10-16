@@ -3,19 +3,24 @@
     <h2>Register</h2>
     <input v-model="username" placeholder="Username" />
     <input v-model="password" placeholder="Password" type="password" />
-    <button @click="register">Register</button>
+    <div style="display:flex; gap:8px;">
+      <button @click="register">Register</button>
+      <button @click="goToLogin" class="link">Already have an account? Login</button>
+    </div>
   </div>
 </template>
 
 <script setup>
 import { ref } from "vue";
+import { useRouter } from "vue-router";
 
-const emit = defineEmits(["registered"]);
+const emit = defineEmits(["registered", "show-login"]);
+const router = useRouter();
 
 const username = ref("");
 const password = ref("");
 
-// 注册函数
+// 注册函数（修复并发送 username + password）
 const register = async () => {
   if (!username.value || !password.value) {
     alert("Please enter username and password");
@@ -23,36 +28,38 @@ const register = async () => {
   }
 
   try {
-    // 1️⃣ 生成本地公钥（临时或伪造），可改为真实RSA/DH生成
-    const rsaPublicSpkiBase64 = "fake_rsa_public_key";
-    const ecdhPublicRawBase64 = "fake_ecdh_public_key";
-
-    // 2️⃣ 调用后端注册接口
     const res = await fetch("http://localhost:3000/api/register", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         username: username.value,
-        password: password.value,
-        rsaPublicSpkiBase64,
-        ecdhPublicRawBase64,
+        password: password.value
       }),
     });
 
     const data = await res.json();
 
-    // 3️⃣ 成功后发出事件
     if (res.ok && data.success) {
-      alert("Registration successful!");
       emit("registered", { username: username.value });
     } else {
-      alert("Registration failed: " + (data.message || "Unknown error"));
+      console.error("Register failed:", data);
+      alert("Register failed: " + (data.message || res.statusText));
     }
   } catch (err) {
     console.error("Register failed:", err);
     alert("Network or server error, see console for details");
   }
 };
+
+// 切换到登录界面：优先使用 router 跳转，同时 emit 事件供父组件处理
+function goToLogin() {
+  try {
+    if (router) router.push("/login");
+  } catch (e) {
+    console.warn("router push failed:", e);
+  }
+  emit("show-login");
+}
 </script>
 
 <style scoped>
@@ -79,5 +86,14 @@ button {
 }
 button:hover {
   background: #1d4ed8;
+}
+button.link {
+  background: transparent;
+  color: #2563eb;
+  border: 1px solid transparent;
+  padding: 8px 12px;
+}
+button.link:hover {
+  background: rgba(37,99,235,0.08);
 }
 </style>
