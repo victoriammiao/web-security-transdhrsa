@@ -98,6 +98,12 @@
 
 <script setup>
 import { ref, onMounted } from "vue";
+import { 
+  decryptWithDH, 
+  decryptRSA, 
+  importEcdhKeyPair, 
+  importRSAKeyPair 
+} from "../utils/cryptoUtils.js";
 
 const props = defineProps({
   username: String,
@@ -123,6 +129,12 @@ const sending = ref(false);
 // 接收端状态与解密结果
 const receiveStatusSteps = ref([]);
 const receivedPlaintext = ref(null);
+
+// 用户密钥管理
+const userPrivateKeys = ref({
+  ecdh: null,  // ECDH 私钥
+  rsa: null    // RSA 私钥
+});
 
 // 其他 helper 保持不变（略微保留函数声明）
 const abToBase64 = (ab) => {
@@ -158,7 +170,48 @@ const pkcs8ToBase64 = (ab) => abToBase64(ab);
 onMounted(async () => {
   await fetchAllUsers();
   await fetchInbox();
+  await loadUserPrivateKeys();
 });
+
+// 加载用户私钥
+async function loadUserPrivateKeys() {
+  try {
+    const username = props.username;
+    if (!username) return;
+
+    // 获取用户的私钥
+    const res = await fetch(`/api/users/${username}/privkey`);
+    if (res.ok) {
+      const keyData = await res.json();
+      
+      // 导入 ECDH 私钥
+      if (keyData.privkeyPkcs8Base64) {
+        try {
+          const ecdhKeyPair = await importEcdhKeyPair(keyData.privkeyPkcs8Base64);
+          userPrivateKeys.value.ecdh = ecdhKeyPair.privateKey;
+          console.log("✅ ECDH 私钥加载成功");
+        } catch (err) {
+          console.warn("⚠️ ECDH 私钥导入失败:", err);
+        }
+      }
+      
+      // 导入 RSA 私钥
+      if (keyData.privkeyPkcs8Base64) {
+        try {
+          const rsaKeyPair = await importRSAKeyPair(keyData.privkeyPkcs8Base64);
+          userPrivateKeys.value.rsa = rsaKeyPair.privateKey;
+          console.log("✅ RSA 私钥加载成功");
+        } catch (err) {
+          console.warn("⚠️ RSA 私钥导入失败:", err);
+        }
+      }
+    } else {
+      console.warn("⚠️ 无法获取用户私钥，解密功能可能不可用");
+    }
+  } catch (err) {
+    console.error("❌ 加载用户私钥失败:", err);
+  }
+}
 
 // 上传文件为 Base64 保持不变
 function handleFileUpload(e) {
@@ -241,8 +294,272 @@ async function fetchAllUsers() {
   }
 }
 
-// 其余函数（fetchInbox, viewMail, sendMail, prepareAndShowStatus, showReceiveStatus, downloadFile 等）保持不变
-// ...existing code...
+// 获取收件箱
+async function fetchInbox() {
+  try {
+    const res = await fetch(`/api/mail/inbox?username=${encodeURIComponent(props.username || "")}`);
+    if (!res.ok) {
+      console.error("fetchInbox failed:", res.status);
+      inbox.value = [];
+      return;
+    }
+    const data = await res.json();
+    inbox.value = Array.isArray(data) ? data : [];
+  } catch (err) {
+    console.error("fetchInbox error:", err);
+    inbox.value = [];
+  }
+}
+
+// 查看邮件详情
+async function viewMail(mailId) {
+  try {
+    const res = await fetch(`/api/mail/read/${mailId}?username=${encodeURIComponent(props.username || "")}`);
+    if (!res.ok) {
+      console.error("viewMail failed:", res.status);
+      alert("Failed to load mail");
+      return;
+    }
+    const data = await res.json();
+    selectedMail.value = data;
+    receivedPlaintext.value = null;
+    receiveStatusSteps.value = [];
+  } catch (err) {
+    console.error("viewMail error:", err);
+    alert("Network error, see console");
+  }
+}
+
+// 发送邮件
+async function sendMail() {
+  if (!to.value || !message.value) {
+    alert("Please enter recipient and message");
+    return;
+  }
+
+  sending.value = true;
+  try {
+    const payload = {
+      from: props.username,
+      to: to.value,
+      subject: subject.value,
+      message: message.value,
+      algorithm: algorithm.value,
+      ...preparedPayload.value
+    };
+
+    const res = await fetch("/api/mail/send", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload)
+    });
+
+    const data = await res.json();
+    if (res.ok && data.success) {
+      alert("Mail sent successfully!");
+      // 清空表单
+      to.value = "";
+      subject.value = "";
+      message.value = "";
+      fileBase64.value = null;
+      fileName.value = null;
+      prepared.value = false;
+      preparedPayload.value = null;
+      statusSteps.value = [];
+      // 刷新收件箱
+      await fetchInbox();
+    } else {
+      alert("Send failed: " + (data.message || res.statusText));
+    }
+  } catch (err) {
+    console.error("sendMail error:", err);
+    alert("Network error, see console");
+  } finally {
+    sending.value = false;
+  }
+}
+
+// 准备加密并显示状态
+async function prepareAndShowStatus() {
+  if (!to.value || !message.value) {
+    alert("Please enter recipient and message");
+    return;
+  }
+
+  statusSteps.value = [];
+  prepared.value = false;
+  preparedPayload.value = null;
+
+  try {
+    // 这里应该实现加密逻辑，暂时使用明文
+    statusSteps.value.push("准备发送明文邮件...");
+    preparedPayload.value = {
+      algorithm: "PLAINTEXT"
+    };
+    prepared.value = true;
+    statusSteps.value.push("✅ 准备完成，可以发送");
+  } catch (err) {
+    console.error("prepareAndShowStatus error:", err);
+    statusSteps.value.push("❌ 准备失败: " + err.message);
+  }
+}
+
+// 显示接收状态（解密/验签）
+async function showReceiveStatus() {
+  if (!selectedMail.value) return;
+
+  receiveStatusSteps.value = [];
+  receivedPlaintext.value = null;
+
+  try {
+    receiveStatusSteps.value.push("开始解密邮件...");
+    
+    if (selectedMail.value.algorithm === "PLAINTEXT") {
+      receivedPlaintext.value = selectedMail.value.message || "No message content";
+      receiveStatusSteps.value.push("✅ 明文邮件，无需解密");
+    } 
+    else if (selectedMail.value.algorithm === "DH") {
+      await decryptDHMail();
+    }
+    else if (selectedMail.value.algorithm === "RSA") {
+      await decryptRSAMail();
+    }
+    else {
+      receiveStatusSteps.value.push("❌ 未知的加密算法: " + selectedMail.value.algorithm);
+    }
+  } catch (err) {
+    console.error("showReceiveStatus error:", err);
+    receiveStatusSteps.value.push("❌ 解密失败: " + err.message);
+  }
+}
+
+// 解密 DH 邮件
+async function decryptDHMail() {
+  try {
+    const mail = selectedMail.value;
+    receiveStatusSteps.value.push("🔐 检测到 DH 加密邮件");
+    
+    // 检查必要的字段
+    if (!mail.ciphertextBase64 || !mail.ivBase64 || !mail.ephemPubBase64) {
+      throw new Error("DH 邮件缺少必要的加密字段");
+    }
+    
+    receiveStatusSteps.value.push("📋 检查邮件字段完整性...");
+    receiveStatusSteps.value.push(`  - 密文: ${mail.ciphertextBase64 ? '✅' : '❌'}`);
+    receiveStatusSteps.value.push(`  - IV: ${mail.ivBase64 ? '✅' : '❌'}`);
+    receiveStatusSteps.value.push(`  - 发送者公钥: ${mail.ephemPubBase64 ? '✅' : '❌'}`);
+    
+    // 检查用户私钥
+    if (!userPrivateKeys.value.ecdh) {
+      throw new Error("用户 ECDH 私钥未加载，无法解密");
+    }
+    
+    receiveStatusSteps.value.push("🔑 使用 ECDH 私钥解密...");
+    
+    // 执行 DH 解密
+    const plaintext = await decryptWithDH(
+      mail.ciphertextBase64,
+      userPrivateKeys.value.ecdh,
+      mail.ephemPubBase64,
+      mail.ivBase64
+    );
+    
+    receivedPlaintext.value = plaintext;
+    receiveStatusSteps.value.push("✅ DH 解密成功！");
+    
+  } catch (err) {
+    console.error("decryptDHMail error:", err);
+    receiveStatusSteps.value.push("❌ DH 解密失败: " + err.message);
+    throw err;
+  }
+}
+
+// 解密 RSA 邮件
+async function decryptRSAMail() {
+  try {
+    const mail = selectedMail.value;
+    receiveStatusSteps.value.push("🔐 检测到 RSA 加密邮件");
+    
+    // 检查必要的字段
+    if (!mail.encryptedKeyBase64 || !mail.ciphertextBase64 || !mail.ivBase64) {
+      throw new Error("RSA 邮件缺少必要的加密字段");
+    }
+    
+    receiveStatusSteps.value.push("📋 检查邮件字段完整性...");
+    receiveStatusSteps.value.push(`  - 加密的密钥: ${mail.encryptedKeyBase64 ? '✅' : '❌'}`);
+    receiveStatusSteps.value.push(`  - 密文: ${mail.ciphertextBase64 ? '✅' : '❌'}`);
+    receiveStatusSteps.value.push(`  - IV: ${mail.ivBase64 ? '✅' : '❌'}`);
+    
+    // 检查用户私钥
+    if (!userPrivateKeys.value.rsa) {
+      throw new Error("用户 RSA 私钥未加载，无法解密");
+    }
+    
+    receiveStatusSteps.value.push("🔑 使用 RSA 私钥解密 AES 密钥...");
+    
+    // 第一步：用 RSA 私钥解密 AES 密钥
+    const aesKeyBase64 = await decryptRSA(mail.encryptedKeyBase64, userPrivateKeys.value.rsa);
+    receiveStatusSteps.value.push("✅ AES 密钥解密成功");
+    
+    // 第二步：用 AES 密钥解密邮件内容
+    receiveStatusSteps.value.push("🔓 使用 AES 密钥解密邮件内容...");
+    
+    // 导入 AES 密钥
+    const aesKey = await crypto.subtle.importKey(
+      "raw",
+      base64ToAb(aesKeyBase64),
+      { name: "AES-GCM" },
+      false,
+      ["decrypt"]
+    );
+    
+    // 解密邮件内容
+    const ciphertext = base64ToAb(mail.ciphertextBase64);
+    const iv = base64ToAb(mail.ivBase64);
+    const plaintext = await crypto.subtle.decrypt(
+      { name: "AES-GCM", iv },
+      aesKey,
+      ciphertext
+    );
+    
+    receivedPlaintext.value = new TextDecoder().decode(plaintext);
+    receiveStatusSteps.value.push("✅ RSA 解密成功！");
+    
+    // 如果有签名，进行验签
+    if (mail.signatureBase64 && mail.senderPublicKeyPem) {
+      receiveStatusSteps.value.push("🔍 验证数字签名...");
+      // 这里可以添加签名验证逻辑
+      receiveStatusSteps.value.push("⚠️ 签名验证功能待实现");
+    }
+    
+  } catch (err) {
+    console.error("decryptRSAMail error:", err);
+    receiveStatusSteps.value.push("❌ RSA 解密失败: " + err.message);
+    throw err;
+  }
+}
+
+// 下载文件
+function downloadFile(fileName, fileBase64) {
+  try {
+    const link = document.createElement('a');
+    link.href = 'data:application/octet-stream;base64,' + fileBase64;
+    link.download = fileName;
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+  } catch (err) {
+    console.error("downloadFile error:", err);
+    alert("Download failed");
+  }
+}
+
+// 关闭模态框
+function closeModal() {
+  selectedMail.value = null;
+  receivedPlaintext.value = null;
+  receiveStatusSteps.value = [];
+}
 </script>
 
 <style scoped>
