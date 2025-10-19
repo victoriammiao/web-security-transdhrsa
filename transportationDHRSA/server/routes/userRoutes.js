@@ -1,5 +1,5 @@
 import express from "express";
-import { getAllUsers, getPubkey, getPrivkey, searchUsers } from "../controllers/userController.js";
+import { getAllUsers, getPubkey, setPubkey, getPrivkey, searchUsers } from "../controllers/userController.js";
 
 const router = express.Router();
 
@@ -9,6 +9,8 @@ router.get("/all", getAllUsers);
 router.get("/search", searchUsers);
 // 获取公钥
 router.get("/:username/pubkey", getPubkey);
+// 设置/更新公钥和私钥
+router.post("/:username/pubkey", setPubkey);
 // 获取私钥（调试专用：生产应禁用）
 router.get("/:username/privkey", getPrivkey);
 

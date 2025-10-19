@@ -111,6 +111,43 @@ export const getPubkey = async (req, res) => {
 };
 
 /**
+ * 设置/更新用户公钥和私钥
+ * 请求体示例：
+ * {
+ *   "ecdhPublicRawBase64": "...",
+ *   "rsaPublicSpkiBase64": "...",
+ *   "privkeyPkcs8Base64": "...",
+ *   "privkeyPem": "..."
+ * }
+ */
+export const setPubkey = async (req, res) => {
+    try {
+        const username = req.params.username;
+        const { ecdhPublicRawBase64, rsaPublicSpkiBase64, privkeyPkcs8Base64, privkeyPem } = req.body;
+
+        if (!username) return res.status(400).json({ message: "username required" });
+
+        const user = await User.findOne({ username });
+        if (!user) return res.status(404).json({ message: "user not found" });
+
+        // 更新公钥字段
+        if (ecdhPublicRawBase64) user.ecdhPublicRawBase64 = ecdhPublicRawBase64;
+        if (rsaPublicSpkiBase64) user.rsaPublicSpkiBase64 = rsaPublicSpkiBase64;
+
+        // 更新私钥字段（仅用于教学/调试）
+        if (privkeyPkcs8Base64) user.privkeyPkcs8Base64 = privkeyPkcs8Base64;
+        if (privkeyPem) user.privkeyPem = privkeyPem;
+
+        await user.save();
+
+        return res.json({ success: true, message: "public key updated successfully" });
+    } catch (err) {
+        console.error("setPubkey error:", err);
+        return res.status(500).json({ message: "internal error", error: err.message });
+    }
+};
+
+/**
  * 返回用户私钥（仅用于本地教学/调试！生产环境严禁暴露）
  * 返回示例字段： { privkeyPkcs8Base64: "...", privkeyPem: "-----BEGIN PRIVATE KEY-----..." }
  */
@@ -136,21 +173,21 @@ export const getPrivkey = async (req, res) => {
 
 // 新增：按 q 参数搜索用户名（用于前端输入时查找）
 export const searchUsers = async (req, res) => {
-  try {
-    const q = (req.query.q || "").trim();
-    if (!q) {
-      // 如果没有 q，返回所有用户（不暴露敏感字段）
-      const users = await User.find({}, { username: 1, _id: 0 }).lean();
-      return res.json(users);
+    try {
+        const q = (req.query.q || "").trim();
+        if (!q) {
+            // 如果没有 q，返回所有用户（不暴露敏感字段）
+            const users = await User.find({}, { username: 1, _id: 0 }).lean();
+            return res.json(users);
+        }
+        // 模糊匹配：前缀或包含，大小写不敏感；限制结果条数
+        const regex = new RegExp(q.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "i");
+        const users = await User.find({ username: { $regex: regex } }, { username: 1, _id: 0 })
+            .limit(50)
+            .lean();
+        return res.json(users);
+    } catch (err) {
+        console.error("searchUsers error:", err);
+        return res.status(500).json({ message: "internal error", error: err.message });
     }
-    // 模糊匹配：前缀或包含，大小写不敏感；限制结果条数
-    const regex = new RegExp(q.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "i");
-    const users = await User.find({ username: { $regex: regex } }, { username: 1, _id: 0 })
-      .limit(50)
-      .lean();
-    return res.json(users);
-  } catch (err) {
-    console.error("searchUsers error:", err);
-    return res.status(500).json({ message: "internal error", error: err.message });
-  }
 };

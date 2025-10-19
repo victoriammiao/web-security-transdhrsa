@@ -11,7 +11,7 @@
         <option disabled value="">Select recipient</option>
         <option v-if="users.length === 0" disabled value="">{{ "(No recipients)" }}</option>
         <option v-for="u in users" :key="u.username" :value="u.username">
-          {{ u.username }}
+          {{ u.username }}{{ u.hasKeys ? '' : ' (需要生成密钥)' }}
         </option>
       </select>
 
@@ -38,6 +38,7 @@
       <div style="display:flex; gap:8px; margin-top:8px;">
         <button @click="prepareAndShowStatus">Prepare & Show Status</button>
         <button @click="sendMail" :disabled="sending">{{ prepared ? 'Send Encrypted Email' : 'Send (plaintext fallback)' }}</button>
+        <button @click="generateUserKeys" style="background: #059669;">Generate Keys</button>
       </div>
 
       <div class="status" v-if="statusSteps.length" style="margin-top:12px;">
@@ -102,7 +103,11 @@ import {
   decryptWithDH, 
   decryptRSA, 
   importEcdhKeyPair, 
-  importRSAKeyPair 
+  importRSAKeyPair,
+  encryptWithDH,
+  encryptRSA,
+  generateEcdhKeyPair,
+  generateRSAKeyPair
 } from "../utils/cryptoUtils.js";
 
 const props = defineProps({
@@ -195,21 +200,106 @@ async function loadUserPrivateKeys() {
         }
       }
       
-      // 导入 RSA 私钥
-      if (keyData.privkeyPkcs8Base64) {
-        try {
-          const rsaKeyPair = await importRSAKeyPair(keyData.privkeyPkcs8Base64);
-          userPrivateKeys.value.rsa = rsaKeyPair.privateKey;
-          console.log("✅ RSA 私钥加载成功");
-        } catch (err) {
-          console.warn("⚠️ RSA 私钥导入失败:", err);
-        }
-      }
+      // 注意：当前系统只存储了 ECDH 私钥，RSA 私钥没有存储
+      // 如果需要 RSA 解密功能，需要修改服务器端存储逻辑
+      console.warn("⚠️ RSA 私钥未存储，RSA 解密功能不可用");
+    } else if (res.status === 404) {
+      console.warn("⚠️ 用户私钥不存在，正在生成新密钥...");
+      await generateUserKeys();
     } else {
       console.warn("⚠️ 无法获取用户私钥，解密功能可能不可用");
     }
   } catch (err) {
     console.error("❌ 加载用户私钥失败:", err);
+  }
+}
+
+// 为用户生成密钥
+async function generateUserKeys() {
+  try {
+    const username = props.username;
+    if (!username) {
+      console.error("❌ 用户名不存在，无法生成密钥");
+      return;
+    }
+
+    console.log(`🔑 开始为用户 ${username} 生成密钥...`);
+    
+    // 生成 ECDH 密钥对
+    const ecdhKeyPair = await generateEcdhKeyPair();
+    console.log("✅ ECDH 密钥对生成成功");
+    
+    // 生成 RSA 密钥对
+    const rsaKeyPair = await generateRSAKeyPair();
+    console.log("✅ RSA 密钥对生成成功");
+    
+    // 上传密钥到服务器
+    const keyData = {
+      ecdhPublicRawBase64: ecdhKeyPair.publicKeyRawBase64,
+      rsaPublicSpkiBase64: rsaKeyPair.publicKeySpkiBase64,
+      privkeyPkcs8Base64: ecdhKeyPair.privateKeyPkcs8Base64, // 存储 ECDH 私钥
+      privkeyPem: null
+    };
+    
+    const uploadRes = await fetch(`http://localhost:3000/api/users/${username}/pubkey`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(keyData)
+    });
+    
+    if (uploadRes.ok) {
+      console.log("✅ 密钥已上传到服务器");
+      
+      // 导入生成的私钥
+      const ecdhKeyPairImported = await importEcdhKeyPair(ecdhKeyPair.privateKeyPkcs8Base64);
+      userPrivateKeys.value.ecdh = ecdhKeyPairImported.privateKey;
+      
+      // 注意：RSA 私钥没有上传到服务器，只在本地使用
+      const rsaKeyPairImported = await importRSAKeyPair(rsaKeyPair.privateKeyPkcs8Base64);
+      userPrivateKeys.value.rsa = rsaKeyPairImported.privateKey;
+      
+      console.log("✅ 用户密钥生成并加载完成");
+    } else {
+      console.error("❌ 密钥上传失败:", await uploadRes.text());
+    }
+    
+  } catch (err) {
+    console.error("❌ 生成用户密钥失败:", err);
+  }
+}
+
+// 获取收件人公钥
+async function getRecipientPublicKey(recipientUsername, keyType = 'ecdh') {
+  try {
+    const res = await fetch(`/api/users/${recipientUsername}/pubkey`);
+    if (!res.ok) {
+      if (res.status === 404) {
+        throw new Error(`收件人 ${recipientUsername} 还没有生成密钥。请让该用户先登录系统以生成密钥。`);
+      } else {
+        throw new Error(`无法获取 ${recipientUsername} 的公钥 (状态码: ${res.status})`);
+      }
+    }
+    
+    const keyData = await res.json();
+    
+    if (keyType === 'ecdh') {
+      const pubKey = keyData.recipientPublicRawBase64 || keyData.ecdhPublicRawBase64;
+      if (!pubKey) {
+        throw new Error(`收件人 ${recipientUsername} 没有 ECDH 公钥`);
+      }
+      return pubKey;
+    } else if (keyType === 'rsa') {
+      const pubKey = keyData.rsaPublicSpkiBase64 || keyData.pubkeyPem;
+      if (!pubKey) {
+        throw new Error(`收件人 ${recipientUsername} 没有 RSA 公钥`);
+      }
+      return pubKey;
+    }
+    
+    return null;
+  } catch (err) {
+    console.error("获取收件人公钥失败:", err);
+    throw err;
   }
 }
 
@@ -285,7 +375,27 @@ async function fetchAllUsers() {
       return;
     }
     const data = await res.json();
-    allUsersCache.value = Array.isArray(data) ? data.map(u => (typeof u === "string" ? { username: u } : { username: u.username })) : [];
+    const userList = Array.isArray(data) ? data.map(u => (typeof u === "string" ? { username: u } : { username: u.username })) : [];
+    
+    // 检查每个用户是否有密钥
+    const usersWithKeyStatus = await Promise.all(
+      userList.map(async (user) => {
+        try {
+          const keyRes = await fetch(`/api/users/${user.username}/pubkey`);
+          return {
+            ...user,
+            hasKeys: keyRes.ok
+          };
+        } catch (err) {
+          return {
+            ...user,
+            hasKeys: false
+          };
+        }
+      })
+    );
+    
+    allUsersCache.value = usersWithKeyStatus;
     users.value = allUsersCache.value.filter(u => u.username !== (props.username || ""));
   } catch (err) {
     console.error("fetchAllUsers error:", err);
@@ -391,16 +501,137 @@ async function prepareAndShowStatus() {
   preparedPayload.value = null;
 
   try {
-    // 这里应该实现加密逻辑，暂时使用明文
-    statusSteps.value.push("准备发送明文邮件...");
-    preparedPayload.value = {
-      algorithm: "PLAINTEXT"
-    };
-    prepared.value = true;
-    statusSteps.value.push("✅ 准备完成，可以发送");
+    if (algorithm.value === "PLAINTEXT") {
+      statusSteps.value.push("准备发送明文邮件...");
+      preparedPayload.value = {
+        algorithm: "PLAINTEXT",
+        message: message.value
+      };
+      prepared.value = true;
+      statusSteps.value.push("✅ 明文邮件准备完成");
+    }
+    else if (algorithm.value === "DH") {
+      await prepareDHEncryption();
+    }
+    else if (algorithm.value === "RSA") {
+      await prepareRSAEncryption();
+    }
+    else {
+      throw new Error("未知的加密算法: " + algorithm.value);
+    }
   } catch (err) {
     console.error("prepareAndShowStatus error:", err);
     statusSteps.value.push("❌ 准备失败: " + err.message);
+  }
+}
+
+// 准备 DH 加密
+async function prepareDHEncryption() {
+  try {
+    statusSteps.value.push("🔐 开始 DH 加密准备...");
+    
+    // 获取收件人公钥
+    statusSteps.value.push("📡 获取收件人公钥...");
+    const recipientPubKey = await getRecipientPublicKey(to.value, 'ecdh');
+    if (!recipientPubKey) {
+      throw new Error("无法获取收件人的 ECDH 公钥");
+    }
+    statusSteps.value.push("✅ 收件人公钥获取成功");
+    
+    // 生成临时密钥对
+    statusSteps.value.push("🔑 生成临时 ECDH 密钥对...");
+    const tempKeyPair = await generateEcdhKeyPair();
+    statusSteps.value.push("✅ 临时密钥对生成成功");
+    
+    // 导入临时私钥
+    const senderPrivKey = await importEcdhKeyPair(tempKeyPair.privateKeyPkcs8Base64);
+    statusSteps.value.push("✅ 临时私钥导入成功");
+    
+    // 执行 DH 加密
+    statusSteps.value.push("🔒 执行 DH 加密...");
+    const encryptedData = await encryptWithDH(
+      message.value,
+      senderPrivKey.privateKey,
+      recipientPubKey
+    );
+    statusSteps.value.push("✅ DH 加密完成");
+    
+    // 准备发送数据
+    preparedPayload.value = {
+      algorithm: "DH",
+      ciphertextBase64: encryptedData.ciphertextBase64,
+      ivBase64: encryptedData.ivBase64,
+      ephemPubBase64: tempKeyPair.publicKeyRawBase64,
+      authTagBase64: null // DH 使用 AES-GCM，authTag 包含在 ciphertext 中
+    };
+    
+    prepared.value = true;
+    statusSteps.value.push("✅ DH 加密邮件准备完成，可以发送");
+    
+  } catch (err) {
+    console.error("prepareDHEncryption error:", err);
+    throw err;
+  }
+}
+
+// 准备 RSA 加密
+async function prepareRSAEncryption() {
+  try {
+    statusSteps.value.push("🔐 开始 RSA 加密准备...");
+    
+    // 获取收件人公钥
+    statusSteps.value.push("📡 获取收件人公钥...");
+    const recipientPubKey = await getRecipientPublicKey(to.value, 'rsa');
+    if (!recipientPubKey) {
+      throw new Error("无法获取收件人的 RSA 公钥");
+    }
+    statusSteps.value.push("✅ 收件人公钥获取成功");
+    
+    // 生成 AES 密钥
+    statusSteps.value.push("🔑 生成 AES 密钥...");
+    const aesKey = await crypto.subtle.generateKey(
+      { name: "AES-GCM", length: 256 },
+      true,
+      ["encrypt", "decrypt"]
+    );
+    statusSteps.value.push("✅ AES 密钥生成成功");
+    
+    // 导出 AES 密钥
+    const aesKeyRaw = await crypto.subtle.exportKey("raw", aesKey);
+    const aesKeyBase64 = abToBase64(aesKeyRaw);
+    statusSteps.value.push("✅ AES 密钥导出成功");
+    
+    // 用 RSA 公钥加密 AES 密钥
+    statusSteps.value.push("🔒 用 RSA 公钥加密 AES 密钥...");
+    const encryptedAesKey = await encryptRSA(aesKeyBase64, recipientPubKey);
+    statusSteps.value.push("✅ AES 密钥加密完成");
+    
+    // 用 AES 密钥加密邮件内容
+    statusSteps.value.push("🔒 用 AES 密钥加密邮件内容...");
+    const iv = crypto.getRandomValues(new Uint8Array(12));
+    const encodedMessage = new TextEncoder().encode(message.value);
+    const ciphertext = await crypto.subtle.encrypt(
+      { name: "AES-GCM", iv },
+      aesKey,
+      encodedMessage
+    );
+    statusSteps.value.push("✅ 邮件内容加密完成");
+    
+    // 准备发送数据
+    preparedPayload.value = {
+      algorithm: "RSA",
+      ciphertextBase64: abToBase64(ciphertext),
+      ivBase64: abToBase64(iv),
+      encryptedKeyBase64: encryptedAesKey,
+      authTagBase64: null // AES-GCM 的 authTag 包含在 ciphertext 中
+    };
+    
+    prepared.value = true;
+    statusSteps.value.push("✅ RSA 加密邮件准备完成，可以发送");
+    
+  } catch (err) {
+    console.error("prepareRSAEncryption error:", err);
+    throw err;
   }
 }
 
@@ -441,7 +672,11 @@ async function decryptDHMail() {
     
     // 检查必要的字段
     if (!mail.ciphertextBase64 || !mail.ivBase64 || !mail.ephemPubBase64) {
-      throw new Error("DH 邮件缺少必要的加密字段");
+      receiveStatusSteps.value.push("📋 检查邮件字段完整性...");
+      receiveStatusSteps.value.push(`  - 密文: ${mail.ciphertextBase64 ? '✅' : '❌'}`);
+      receiveStatusSteps.value.push(`  - IV: ${mail.ivBase64 ? '✅' : '❌'}`);
+      receiveStatusSteps.value.push(`  - 发送者公钥: ${mail.ephemPubBase64 ? '✅' : '❌'}`);
+      throw new Error("DH 邮件缺少必要的加密字段，可能是明文邮件被错误标记为 DH 类型");
     }
     
     receiveStatusSteps.value.push("📋 检查邮件字段完整性...");
@@ -451,7 +686,9 @@ async function decryptDHMail() {
     
     // 检查用户私钥
     if (!userPrivateKeys.value.ecdh) {
-      throw new Error("用户 ECDH 私钥未加载，无法解密");
+      receiveStatusSteps.value.push("⚠️ 用户 ECDH 私钥未加载");
+      receiveStatusSteps.value.push("💡 建议：重新登录或联系管理员生成密钥");
+      throw new Error("用户 ECDH 私钥未加载，无法解密。请确保已生成用户密钥。");
     }
     
     receiveStatusSteps.value.push("🔑 使用 ECDH 私钥解密...");
